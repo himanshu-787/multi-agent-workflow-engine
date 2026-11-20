@@ -13,11 +13,16 @@ class DeterministicFastEmbedding(EmbeddingFunction):
     def __init__(self, dimension: int = 128) -> None:
         self.dimension = dimension
 
-    def name(self) -> str:
+    @staticmethod
+    def name() -> str:
         return "deterministic_fast_embedding"
 
     def get_config(self) -> dict:
         return {"dimension": self.dimension}
+
+    @classmethod
+    def build_from_config(cls, config: dict) -> "DeterministicFastEmbedding":
+        return cls(dimension=config.get("dimension", 128))
 
     def __call__(self, input: Documents) -> Embeddings:
         results = []

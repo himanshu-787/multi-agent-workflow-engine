@@ -14,3 +14,4 @@ class WorkflowState(TypedDict, total=False):
     execution_result: str
     human_feedback: str | None
     memory_context: str | None
+    require_human_approval: bool

@@ -27,7 +27,7 @@ def make_finalize(memory_store=None):
                     critique=state.get("critique", ""),
                 )
             except Exception:
-                pass  # Do not block finalize if memory write encounters issue
+                pass
 
         return {"final_status": status}
 
@@ -49,10 +49,13 @@ def make_memory_retriever(memory_store):
     return memory_retriever
 
 
-def make_router(max_iterations: int, require_human_approval: bool = False):
+def make_router(max_iterations: int, default_require_human_approval: bool = False):
     def route_after_critic(state: WorkflowState) -> str:
+        needs_human = state.get("require_human_approval", default_require_human_approval)
         if state.get("approved"):
-            return "human_review" if require_human_approval else "finalize"
+            if needs_human:
+                return "human_review"
+            return "finalize"
         if state.get("iterations", 0) >= max_iterations:
             return "finalize"
         return "coder"
@@ -92,10 +95,8 @@ def build_graph(
     graph.add_node("researcher", make_researcher(llm))
     graph.add_node("coder", make_coder(llm))
     graph.add_node("critic", make_critic(llm))
+    graph.add_node("human_review", human_review_node)
     graph.add_node("finalize", make_finalize(active_memory))
-
-    if require_human_approval:
-        graph.add_node("human_review", human_review_node)
 
     if enable_memory and active_memory is not None:
         graph.add_node("memory_retriever", make_memory_retriever(active_memory))
@@ -113,31 +114,26 @@ def build_graph(
         graph.add_edge("researcher", "coder")
         graph.add_edge("coder", "critic")
 
-    critic_destinations = {"coder": "coder", "finalize": "finalize"}
-    if require_human_approval:
-        critic_destinations["human_review"] = "human_review"
-
     graph.add_conditional_edges(
         "critic",
-        make_router(max_iterations, require_human_approval=require_human_approval),
-        critic_destinations,
+        make_router(max_iterations, default_require_human_approval=require_human_approval),
+        {"coder": "coder", "human_review": "human_review", "finalize": "finalize"},
     )
 
-    if require_human_approval:
-        graph.add_conditional_edges(
-            "human_review",
-            make_human_router(max_iterations),
-            {"coder": "coder", "finalize": "finalize"},
-        )
+    graph.add_conditional_edges(
+        "human_review",
+        make_human_router(max_iterations),
+        {"coder": "coder", "finalize": "finalize"},
+    )
 
     graph.add_edge("finalize", END)
 
     compile_kwargs = {}
     if checkpointer is not None:
         compile_kwargs["checkpointer"] = checkpointer
-    if interrupt_before is not None:
+        # Always interrupt before human_review when checkpointer is present
+        compile_kwargs["interrupt_before"] = interrupt_before or ["human_review"]
+    elif interrupt_before is not None:
         compile_kwargs["interrupt_before"] = interrupt_before
-    elif require_human_approval and checkpointer is not None:
-        compile_kwargs["interrupt_before"] = ["human_review"]
 
     return graph.compile(**compile_kwargs)
