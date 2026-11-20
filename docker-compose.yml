@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  orchestrator-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: multi-agent-orchestrator
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - MODEL_NAME=gpt-4o-mini
+      - CHROMA_PATH=/app/data/chroma
+      - CHECKPOINT_DB=/app/data/checkpoints.sqlite
+      - MAX_CRITIC_ITERATIONS=3
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
