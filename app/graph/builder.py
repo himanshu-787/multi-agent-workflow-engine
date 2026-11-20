@@ -1,31 +1,59 @@
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import END, START, StateGraph
+
+from app.agents.coder import make_coder
+from app.agents.critic import make_critic
+from app.agents.llm import get_llm
+from app.agents.researcher import make_researcher
+from app.config import settings
 from app.graph.state import WorkflowState
 
 
-def researcher(state: WorkflowState) -> dict:
-    return {"research_notes": f"[stub] research for: {state['task']}"}
+def finalize(state: WorkflowState) -> dict:
+    status = "approved" if state.get("approved") else "max_iterations_reached"
+    return {"final_status": status}
 
 
-def coder(state: WorkflowState) -> dict:
-    return {"code": "print('hello world')"}
+def make_router(max_iterations: int):
+    def route_after_critic(state: WorkflowState) -> str:
+        if state.get("approved"):
+            return "finalize"
+        if state.get("iterations", 0) >= max_iterations:
+            return "finalize"  # safety valve: never loop forever
+        return "coder"  # the cycle
+
+    return route_after_critic
 
 
-def critic(state: WorkflowState) -> dict:
-    return {
-        "approved": True,
-        "critique": "[stub] looks fine",
-        "iterations": state.get("iterations", 0) + 1,
-    }
+def build_graph(
+    llm=None,
+    max_iterations: int | None = None,
+    checkpointer=None,
+    interrupt_before: list[str] | None = None,
+):
+    llm = llm or get_llm()
+    if max_iterations is None:
+        max_iterations = settings.max_critic_iterations
 
-
-def build_graph():
     graph = StateGraph(WorkflowState)
-    graph.add_node("researcher", researcher)
-    graph.add_node("coder", coder)
-    graph.add_node("critic", critic)
+    graph.add_node("researcher", make_researcher(llm))
+    graph.add_node("coder", make_coder(llm))
+    graph.add_node("critic", make_critic(llm))
+    graph.add_node("finalize", finalize)
 
     graph.add_edge(START, "researcher")
     graph.add_edge("researcher", "coder")
     graph.add_edge("coder", "critic")
-    graph.add_edge("critic", END)
-    return graph.compile()
+    graph.add_conditional_edges(
+        "critic",
+        make_router(max_iterations),
+        {"coder": "coder", "finalize": "finalize"},
+    )
+    graph.add_edge("finalize", END)
+
+    compile_kwargs = {}
+    if checkpointer is not None:
+        compile_kwargs["checkpointer"] = checkpointer
+    if interrupt_before is not None:
+        compile_kwargs["interrupt_before"] = interrupt_before
+
+    return graph.compile(**compile_kwargs)
