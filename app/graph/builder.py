@@ -8,13 +8,45 @@ from app.agents.researcher import make_researcher
 from app.config import settings
 from app.graph.state import WorkflowState
 from app.hitl.approval import human_review_node
+from app.memory.store import default_memory_store
 
 
-def finalize(state: WorkflowState) -> dict:
-    if state.get("final_status") in ("approved", "rejected_by_human"):
-        return {}
-    status = "approved" if state.get("approved") else "max_iterations_reached"
-    return {"final_status": status}
+def make_finalize(memory_store=None):
+    def finalize(state: WorkflowState) -> dict:
+        if state.get("final_status") in ("approved", "rejected_by_human"):
+            status = state["final_status"]
+        else:
+            status = "approved" if state.get("approved") else "max_iterations_reached"
+
+        # If approved and memory store available, save to long-term memory
+        if status == "approved" and memory_store is not None:
+            try:
+                memory_store.save_run(
+                    task=state.get("task", ""),
+                    code=state.get("code", ""),
+                    critique=state.get("critique", ""),
+                )
+            except Exception:
+                pass  # Do not block finalize if memory write encounters issue
+
+        return {"final_status": status}
+
+    return finalize
+
+
+def make_memory_retriever(memory_store):
+    def memory_retriever(state: WorkflowState) -> dict:
+        task = state.get("task", "")
+        if not task or not memory_store:
+            return {}
+        try:
+            matches = memory_store.search(task, n_results=2)
+            context = memory_store.format_context(matches)
+            return {"memory_context": context}
+        except Exception:
+            return {"memory_context": ""}
+
+    return memory_retriever
 
 
 def make_router(max_iterations: int, require_human_approval: bool = False):
@@ -22,8 +54,8 @@ def make_router(max_iterations: int, require_human_approval: bool = False):
         if state.get("approved"):
             return "human_review" if require_human_approval else "finalize"
         if state.get("iterations", 0) >= max_iterations:
-            return "finalize"  # safety valve: iteration limit reached
-        return "coder"  # cyclic loop
+            return "finalize"
+        return "coder"
 
     return route_after_critic
 
@@ -32,7 +64,6 @@ def make_human_router(max_iterations: int):
     def route_after_human(state: WorkflowState) -> str:
         if state.get("approved"):
             return "finalize"
-        # If human rejected with feedback and iteration limit not reached, loop back
         if state.get("iterations", 0) < max_iterations:
             return "coder"
         return "finalize"
@@ -48,21 +79,30 @@ def build_graph(
     enable_tools: bool = True,
     tool_registry=None,
     require_human_approval: bool = False,
+    enable_memory: bool = False,
+    memory_store=None,
 ):
     llm = llm or get_llm()
     if max_iterations is None:
         max_iterations = settings.max_critic_iterations
 
+    active_memory = memory_store if (enable_memory and memory_store is not None) else (default_memory_store if enable_memory else None)
+
     graph = StateGraph(WorkflowState)
     graph.add_node("researcher", make_researcher(llm))
     graph.add_node("coder", make_coder(llm))
     graph.add_node("critic", make_critic(llm))
-    graph.add_node("finalize", finalize)
+    graph.add_node("finalize", make_finalize(active_memory))
 
     if require_human_approval:
         graph.add_node("human_review", human_review_node)
 
-    graph.add_edge(START, "researcher")
+    if enable_memory and active_memory is not None:
+        graph.add_node("memory_retriever", make_memory_retriever(active_memory))
+        graph.add_edge(START, "memory_retriever")
+        graph.add_edge("memory_retriever", "researcher")
+    else:
+        graph.add_edge(START, "researcher")
 
     if enable_tools:
         graph.add_node("executor", make_executor(tool_registry))
@@ -73,7 +113,6 @@ def build_graph(
         graph.add_edge("researcher", "coder")
         graph.add_edge("coder", "critic")
 
-    # Routing destinations after critic
     critic_destinations = {"coder": "coder", "finalize": "finalize"}
     if require_human_approval:
         critic_destinations["human_review"] = "human_review"
