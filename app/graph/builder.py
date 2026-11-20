@@ -2,6 +2,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.coder import make_coder
 from app.agents.critic import make_critic
+from app.agents.executor import make_executor
 from app.agents.llm import get_llm
 from app.agents.researcher import make_researcher
 from app.config import settings
@@ -29,6 +30,8 @@ def build_graph(
     max_iterations: int | None = None,
     checkpointer=None,
     interrupt_before: list[str] | None = None,
+    enable_tools: bool = True,
+    tool_registry=None,
 ):
     llm = llm or get_llm()
     if max_iterations is None:
@@ -41,8 +44,16 @@ def build_graph(
     graph.add_node("finalize", finalize)
 
     graph.add_edge(START, "researcher")
-    graph.add_edge("researcher", "coder")
-    graph.add_edge("coder", "critic")
+
+    if enable_tools:
+        graph.add_node("executor", make_executor(tool_registry))
+        graph.add_edge("researcher", "coder")
+        graph.add_edge("coder", "executor")
+        graph.add_edge("executor", "critic")
+    else:
+        graph.add_edge("researcher", "coder")
+        graph.add_edge("coder", "critic")
+
     graph.add_conditional_edges(
         "critic",
         make_router(max_iterations),

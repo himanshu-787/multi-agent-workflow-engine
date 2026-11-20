@@ -35,3 +35,13 @@ def test_loop_stops_at_max_iterations():
 def test_strip_code_fences():
     assert strip_code_fences("```python\nx = 1\n```") == "x = 1"
     assert strip_code_fences("x = 1") == "x = 1"
+
+
+def test_graph_with_tool_execution():
+    llm = FakeLLM([approve()])
+    result = build_graph(llm=llm, max_iterations=3, enable_tools=True).invoke(
+        {"task": "define an add function"}
+    )
+    assert result["approved"] is True
+    assert "[SUCCESS]" in result["execution_result"]
+
